@@ -1,0 +1,23 @@
+[Unit]
+Description=Hermes WeChat iLink Gateway
+After=network.target
+
+[Service]
+Type=simple
+User=%USER%
+WorkingDirectory=%HOME%/.hermes/hermes-agent
+ExecStart=%PYTHON% -m gateway.run
+Restart=always
+RestartSec=5
+StandardOutput=append:%HOME%/.hermes/logs/gateway.log
+StandardError=append:%HOME%/.hermes/logs/gateway.log
+
+# 加载 .env 文件中的环境变量
+EnvironmentFile=%HOME%/.hermes/.env
+
+# 网关配置
+Environment=GATEWAY_ALLOW_ALL_USERS=true
+Environment=WECHAT_ILINK_ALLOW_ALL_USERS=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,12 @@
+# Hermes WeChat iLink Bot - Dependencies
+# Python 3.9+
+
+# WeChat Bot SDK - provides iLink protocol support for personal WeChat
+wechatbot-sdk>=1.0.0
+
+# QR Code generation - for displaying login QR codes in terminal
+qrcode>=7.4.0
+
+# Optional: Hermes Agent Framework (if using as Hermes platform adapter)
+# Uncomment if deploying within Hermes ecosystem:
+# hermes-agent>=0.1.0
