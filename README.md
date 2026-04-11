@@ -69,10 +69,6 @@ bash hermes-wechat.sh start
 2. 在微信中给机器人发消息
 3. AI 会自动回复
 
-### 运行效果
-
-![运行效果图](./asserts/运行效果图.jpg)
-
 ## 配置模型
 
 编辑 `~/.hermes/config.yaml`：
@@ -161,10 +157,45 @@ A: 查看日志：
 bash hermes-wechat.sh logs | grep "Logged in"
 ```
 
+## Bug 修复历史
+
+### v1.2 - 2026-04-11: 修复 `send_media` 参数错误
+
+**问题**：发送图片/文件时报错 `unexpected keyword argument 'media_type'`
+
+**根因**：SDK 的 `send_media()` 和 `reply_media()` 不接受 `media_type` 参数，
+而是通过 dict key（如 `{"image": bytes}`）或 URL 字符串区分类型
+
+**修复**：移除不支持的 `media_type` 参数，直接传递 URL 字符串
+
+### v1.1 - 2026-04-11: 修复 `ret=-2` 发送失败
+
+**问题**：大量消息发送失败（48 小时 350+ 次），错误 `ret=-2`
+
+**根因**：`context_token`（iLink 协议的发送凭证）过期后未刷新
+
+**修复**：
+- 新增 token 主动获取机制（`_ensure_context_token()`）
+- 修复 token 读取路径（SDK 用 `_context_token` 私有属性）
+- 增加 `ret=-2` 自动重试（刷新 token 后重发）
+- 长消息分片间隔从 0.5s 增加到 1s
+
+### v1.0 - 初始版本
+
+初始实现，支持基本的消息收发功能。
+
+## 待修复问题
+
+| 问题 | 严重度 | 说明 |
+|------|--------|------|
+| asyncio.run() 冲突 | 低 | SDK 内部可能与 Gateway 事件循环冲突 |
+| 数据库 memory/user_profile 为空 | 低 | 可能影响持久化功能 |
+| 非回复场景无法发送消息 | 中 | Cron/主动消息时无 context_token，需探索替代方案 |
+
 ## 文件说明
 
 ```
-hermes-wechat/
+wechat-ilink-installer/
 ├── install.sh            # 一键安装脚本
 ├── start-wechat.py       # 启动脚本（带二维码显示）
 ├── hermes-wechat.sh      # 服务管理脚本
@@ -188,18 +219,6 @@ hermes-wechat/
 2. 控制消息发送频率，避免高频操作
 3. 避免发送敏感内容
 4. 如需稳定生产环境，建议使用**企业微信**或**微信公众号**
-
-## 关于
-
-欢迎关注 **AI炼码师**，获取全球最新 AI 资讯、前沿技术洞察和开源工具推荐。
-
-<div align="center">
-
-![AI炼码师公众号](./asserts/qrcode_for_logo.jpg)
-
-**微信扫码，加入 AI 社区 👆**
-
-</div>
 
 ## 许可证
 

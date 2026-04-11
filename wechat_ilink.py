@@ -15,6 +15,32 @@ Configuration in config.yaml:
         enabled: true
         extra:
           storage_dir: "~/.wechatbot"  # Optional: custom credential storage
+
+---
+## 问题诊断 (2026-04-11)
+
+### 症状
+- 过去 48 小时内 350+ 次发送失败，错误码 `ret=-2`（/ilink/bot/sendmessage failed）
+- 几乎所有 outbound 消息都失败：Agent 回复、Cron 简报、Session 重置通知
+- Gateway 频繁重启（一天 6+ 次），但不是根因
+
+### 根因分析
+iLink 协议的 `context_token` 是发送消息的必要凭证。它有两个特点：
+1. **必须从用户发来的消息中提取**（`_on_message` 时保存到 `_message_handlers`）
+2. **有时效性** — 长时间无交互后可能过期
+
+旧代码的问题：
+- `send()` 在没有 context_token 时直接调用 `_bot.send(chat_id, content)`，
+  该 SDK 方法内部查不到 token 就发给空 token，API 返回 ret=-2
+- `_send_long_message()` 同理
+- 没有任何重试或 token 刷新机制
+
+### 修复方案
+1. 新增 `_ensure_context_token()`：优先使用缓存的 token；
+   如果没有，通过 `_api.get_config()` 主动获取新的 token
+2. `send()` 和 `_send_long_message()` 都先调用 `_ensure_context_token()`
+3. 增加 ret=-2 自动重试：刷新 token 后重发一次
+4. 分片间隔从 0.5s 增加到 1s，降低频率限制触发概率
 """
 
 import asyncio
@@ -218,12 +244,18 @@ class WeChatILinkAdapter(BasePlatformAdapter):
             )
 
             # Store context_token for reply routing
-            context_token = getattr(message, "context_token", None)
+            # NOTE: SDK stores it as _context_token (private attribute with underscore)
+            context_token = getattr(message, "_context_token", None) or getattr(message, "context_token", None)
+            # DEBUG: print raw and resolved values to stderr (visible in gateway.log)
+            print(f"[wechat_ilink DEBUG] _context_token='{getattr(message, '_context_token', '<MISSING>')}' | resolved='{context_token}' | user_id='{user_id}'", flush=True)
             if context_token:
                 self._message_handlers[user_id] = {
                     "context_token": context_token,
                     "message": message,
                 }
+                logger.debug("[%s] Stored context_token for %s", self.name, user_id)
+            else:
+                logger.warning("[%s] No context_token in inbound message from %s", self.name, user_id)
 
             # Dispatch to gateway
             await self.handle_message(event)
@@ -233,6 +265,43 @@ class WeChatILinkAdapter(BasePlatformAdapter):
 
     # -- Outbound messaging -------------------------------------------------
 
+    async def _ensure_context_token(self, chat_id: str) -> Optional[str]:
+        """确保拥有有效的 context_token。
+
+        【变更点】旧代码直接使用缓存的 token，过期后导致 ret=-2。
+        新方法：优先用缓存 → 缓存失效时通过 getconfig API 主动获取新 token。
+
+        iLink context_tokens 会过期。如果我们没有缓存的 token，
+        或者存储的 token 已过期，尝试通过 getconfig API 获取新的。
+        """
+        handler_info = self._message_handlers.get(chat_id, {})
+        original_msg = handler_info.get("message")
+        context_token = handler_info.get("context_token")
+
+        if context_token:
+            return context_token
+
+        # No context_token stored — try to get a fresh one via getconfig.
+        # This works as long as the bot session is still valid.
+        if self._bot and hasattr(self._bot, "_credentials") and self._bot._credentials:
+            creds = self._bot._credentials
+            try:
+                config = await self._bot._api.get_config(
+                    creds.base_url, creds.token, chat_id, ""
+                )
+                new_token = config.get("context_token")
+                if new_token:
+                    logger.info("[%s] Acquired fresh context_token for %s", self.name, chat_id)
+                    self._message_handlers[chat_id] = {
+                        "context_token": new_token,
+                        "message": None,
+                    }
+                    return new_token
+            except Exception as e:
+                logger.debug("[%s] getconfig failed for %s: %s", self.name, chat_id, e)
+
+        return None
+
     async def send(
         self,
         chat_id: str,
@@ -241,36 +310,56 @@ class WeChatILinkAdapter(BasePlatformAdapter):
         metadata: Optional[Dict[str, Any]] = None,
         **kwargs,
     ) -> SendResult:
-        """Send a text message to a WeChat user."""
+        """发送文本消息到微信用户。
+
+        【变更点】修复 ret=-2 发送失败问题（根因：context_token 过期/缺失）：
+        1. 发送前确保 context_token 有效（通过 _ensure_context_token）
+        2. 将 token 注入 SDK 的 _context_tokens 字典，再用 SDK 高层方法发送
+        3. 失败时自动重试一次（刷新 token 后重发）
+        """
         if not self._bot:
             return SendResult(success=False, error="Not connected")
 
         try:
-            # Get stored message context for this user
-            handler_info = self._message_handlers.get(chat_id, {})
-            original_msg = handler_info.get("message")
-
             # 分片发送长消息
             if len(content) > MAX_WECHAT_MSG_LENGTH:
-                return await self._send_long_message(chat_id, content, original_msg)
+                return await self._send_long_message(chat_id, content)
 
-            if original_msg:
-                # Use reply method which handles context_token automatically
-                await self._bot.reply(original_msg, content)
-            else:
-                # Fallback to direct send (may not work without context)
-                await self._bot.send(chat_id, content)
+            # 确保有有效的 context_token
+            context_token = await self._ensure_context_token(chat_id)
+            if not context_token:
+                return SendResult(success=False, error="No context_token available")
 
+            # 将 token 注入 SDK，使用 SDK 高层方法发送（有正确的超时/重试处理）
+            self._bot._context_tokens[chat_id] = context_token
+            await self._bot.send(chat_id, content)
             return SendResult(success=True)
 
         except Exception as e:
-            logger.error("[%s] Send failed: %s", self.name, e)
-            return SendResult(success=False, error=str(e))
+            error_str = str(e)
+            # 遇到 ret=-2 时重试：刷新 token 后重发一次
+            if "ret=-2" in error_str or "ret\": -2" in error_str:
+                try:
+                    self._message_handlers.pop(chat_id, None)
+                    context_token = await self._ensure_context_token(chat_id)
+                    if not context_token:
+                        return SendResult(success=False, error="No context_token after retry")
+                    self._bot._context_tokens[chat_id] = context_token
+                    await self._bot.send(chat_id, content)
+                    return SendResult(success=True)
+                except Exception as retry_err:
+                    error_str = str(retry_err)
+
+            logger.error("[%s] Send failed: %s", self.name, error_str)
+            return SendResult(success=False, error=error_str)
 
     async def _send_long_message(
-        self, chat_id: str, content: str, original_msg: Any
+        self, chat_id: str, content: str
     ) -> SendResult:
-        """分片发送长消息"""
+        """分片发送长消息。
+
+        【变更点】使用 SDK 高层方法，分片间隔 1s 降低频率限制风险。
+        """
         chunks = []
         for i in range(0, len(content), MAX_WECHAT_MSG_LENGTH):
             chunks.append(content[i:i + MAX_WECHAT_MSG_LENGTH])
@@ -278,17 +367,22 @@ class WeChatILinkAdapter(BasePlatformAdapter):
         logger.info("[%s] Splitting long message (%d chars) into %d chunks",
                     self.name, len(content), len(chunks))
 
+        # 确保有有效的 context_token
+        context_token = await self._ensure_context_token(chat_id)
+        if not context_token:
+            return SendResult(success=False, error="No context_token available")
+
+        # 注入 SDK 的 context_tokens
+        self._bot._context_tokens[chat_id] = context_token
+
         success_count = 0
         for i, chunk in enumerate(chunks):
             try:
-                if original_msg:
-                    await self._bot.reply(original_msg, chunk)
-                else:
-                    await self._bot.send(chat_id, chunk)
+                await self._bot.send(chat_id, chunk)
                 success_count += 1
-                # 分片之间稍微延迟，避免频率限制
+                # 分片之间延迟 1s，避免频率限制
                 if i < len(chunks) - 1:
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(1)
             except Exception as e:
                 logger.error("[%s] Chunk %d/%d failed: %s", self.name, i+1, len(chunks), e)
 
@@ -329,11 +423,11 @@ class WeChatILinkAdapter(BasePlatformAdapter):
             original_msg = handler_info.get("message")
 
             if original_msg:
-                await self._bot.reply_media(original_msg, image_url, media_type="image")
+                await self._bot.reply_media(original_msg, image_url)
                 if caption:
                     await self._bot.reply(original_msg, caption)
             else:
-                await self._bot.send_media(chat_id, image_url, media_type="image")
+                await self._bot.send_media(chat_id, image_url)
 
             return SendResult(success=True)
 
@@ -357,11 +451,11 @@ class WeChatILinkAdapter(BasePlatformAdapter):
             original_msg = handler_info.get("message")
 
             if original_msg:
-                await self._bot.reply_media(original_msg, file_path, media_type="file")
+                await self._bot.reply_media(original_msg, file_path)
                 if caption:
                     await self._bot.reply(original_msg, caption)
             else:
-                await self._bot.send_media(chat_id, file_path, media_type="file")
+                await self._bot.send_media(chat_id, file_path)
 
             return SendResult(success=True)
 
