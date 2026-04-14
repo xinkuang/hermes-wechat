@@ -70,25 +70,33 @@ hermes gateway logs | grep 'Scan this URL' | tail -1
 
 ### 卸载
 
-如需卸载，运行：
-
 ```bash
 cd hermes-wechat
-bash uninstall.sh
+bash hermes-wechat.sh uninstall    # 或 bash uninstall.sh，两者等价
 ```
 
-卸载脚本会自动恢复所有原始文件（通过 .bak 备份）。
+卸载脚本会完成以下操作：
+1. 停止并卸载 systemd 服务
+2. 删除 wechat_ilink.py 适配器
+3. 恢复官方微信 weixin.py
+4. 恢复被修改的 Hermes 官方文件（config.py、run.py、tools_config.py）
+5. 清理 config.yaml 和 .env 中的 wechat_ilink 配置
+6. 清理 wechatbot 登录凭据
 
 ## 服务管理
 
 | 命令 | 说明 |
 |------|------|
-| `hermes gateway status` | 查看服务状态 |
-| `hermes gateway logs` | 查看运行日志 |
-| `hermes gateway stop` | 停止服务 |
-| `hermes gateway restart` | 重启服务 |
+| `hermes gateway status` | 查看 Hermes 服务状态 |
+| `hermes gateway logs` | 查看 Hermes 运行日志 |
+| `hermes gateway stop` | 停止 Hermes 服务 |
+| `hermes gateway restart` | 重启 Hermes 服务 |
+| `bash hermes-wechat.sh start` | 启动 systemd 服务 |
+| `bash hermes-wechat.sh stop` | 停止 systemd 服务 |
+| `bash hermes-wechat.sh restart` | 重启 systemd 服务 |
 | `bash hermes-wechat.sh status` | 查看 systemd 服务状态 |
 | `bash hermes-wechat.sh logs` | 查看 systemd 服务日志 |
+| `bash hermes-wechat.sh uninstall` | 卸载微信插件（完全恢复） |
 
 ## 配置
 

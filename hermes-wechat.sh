@@ -60,14 +60,8 @@ install_service() {
 }
 
 uninstall_service() {
-    echo "卸载 Hermes WeChat 服务..."
-
-    systemctl stop "$SERVICE_NAME" 2>/dev/null || true
-    systemctl disable "$SERVICE_NAME" 2>/dev/null || true
-    rm -f "$SERVICE_FILE"
-    systemctl daemon-reload
-
-    echo "✓ 服务已卸载"
+    # 调用完整卸载脚本（包含 systemd 清理 + Hermes 文件恢复）
+    bash "$SCRIPT_DIR/uninstall.sh"
 }
 
 start_service() {

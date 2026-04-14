@@ -173,13 +173,41 @@ if [ -f "$CONFIG_YAML" ]; then
     # 添加 wechat_ilink 配置（如果还没有）
     if ! grep -q "wechat_ilink:" "$CONFIG_YAML" 2>/dev/null; then
         echo "添加 wechat_ilink 配置到 config.yaml..."
-        cat >> "$CONFIG_YAML" << 'YAML_EOF'
-  wechat_ilink:
+        python3 -c "
+import re
+with open('$CONFIG_YAML', 'r') as f:
+    content = f.read()
+
+wechat_ilink_block = '''  wechat_ilink:
     enabled: true
     extra:
-      dm_policy: "open"
-      storage_dir: "~/.wechatbot"
-YAML_EOF
+      dm_policy: \"open\"
+      storage_dir: \"~/.wechatbot\"
+'''
+
+# 尝试在 weixin 块后插入（在 platforms: 下）
+# 找到 weixin: 行，在其下一行同级 key 之前插入
+pattern = r'(  weixin:[^\n]*(?:\n    [^\n]*)*)'
+match = re.search(pattern, content)
+if match:
+    insert_pos = match.end()
+    # 确保插入位置在新行
+    if content[insert_pos:insert_pos+1] != '\n':
+        insert_pos += 1
+    content = content[:insert_pos] + '\n' + wechat_ilink_block + content[insert_pos:]
+else:
+    # 没找到 weixin，尝试在 platforms: 下直接插入
+    platforms_match = re.search(r'(platforms:\n)', content)
+    if platforms_match:
+        insert_pos = platforms_match.end()
+        content = content[:insert_pos] + wechat_ilink_block + content[insert_pos:]
+    else:
+        # 没有 platforms: 节，创建它
+        content += '\nplatforms:\n' + wechat_ilink_block
+
+with open('$CONFIG_YAML', 'w') as f:
+    f.write(content)
+"
         echo "✓ wechat_ilink 配置已添加"
     else
         echo "  wechat_ilink 配置已存在（跳过）"
