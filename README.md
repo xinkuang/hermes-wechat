@@ -9,6 +9,9 @@
 - 💬 **消息收发** - 支持文本、图片、文件
 - 🔄 **自动重连** - 断线自动重连
 - ⚡ **开机自启** - 支持 systemd 服务管理
+- 📝 **Markdown 格式化** - AI 回复自动转换为微信友好格式
+- 🛡️ **消息去重** - 防止网络重试导致重复回复
+- 🔐 **Token 持久化** - 重启后 context_token 自动恢复
 
 ## 系统要求
 
@@ -21,13 +24,18 @@
 ### 一键安装
 
 ```bash
-# 下载安装包
+# 下载并安装
 git clone https://github.com/xinkuang/hermes-wechat.git
 cd hermes-wechat
-
-# 运行安装
 bash install.sh
 ```
+
+安装脚本会自动完成以下操作：
+1. 安装依赖（wechatbot-sdk、qrcode）
+2. 复制适配器到 Hermes gateway
+3. 禁用官方微信 weixin 插件
+4. 注册 Platform 枚举和路由
+5. 更新配置和重启 gateway
 
 ### 启动方式
 
@@ -157,7 +165,41 @@ A: 查看日志：
 bash hermes-wechat.sh logs | grep "Logged in"
 ```
 
-## Bug 修复历史
+## 版本历史
+
+### v1.3 - 2026-04-14: 全面架构升级
+
+**新增功能：**
+
+| 功能 | 说明 |
+|------|------|
+| `ContextTokenStore` | context_token 磁盘持久化，重启后自动恢复 |
+| 消息去重 | 5 分钟 TTL 去重，防止重复响应 |
+| Markdown 格式化 | 标题、表格、代码块微信友好渲染 |
+| `TypingTicketCache` | 打字状态指示器缓存 |
+| DM 策略控制 | `dm_policy` 配置项（open/allowlist/disabled） |
+| `qr_login()` | 独立 QR 登录函数，可用于 CLI |
+| `send_wechat_direct()` | 绕过适配器直接发送消息 |
+
+**Markdown 格式化效果：**
+
+| 输入 | 改造前 | 改造后 |
+|------|--------|--------|
+| `# 分析结果` | `# 分析结果` | `【分析结果】` |
+| `\| A \| B \|` 表格 | 原始 pipe 文本 | `- A: 值` 列表 |
+| 超长代码块 | 按 1500 字硬切 | 按 block 边界，代码块完整 |
+
+**配置示例（可选）：**
+
+```yaml
+platforms:
+  wechat_ilink:
+    enabled: true
+    extra:
+      dm_policy: "open"        # open | allowlist | disabled
+      allow_from: []           # dm_policy=allowlist 时生效
+      storage_dir: "~/.wechatbot"
+```
 
 ### v1.2 - 2026-04-11: 修复 `send_media` 参数错误
 
@@ -190,17 +232,17 @@ bash hermes-wechat.sh logs | grep "Logged in"
 |------|--------|------|
 | asyncio.run() 冲突 | 低 | SDK 内部可能与 Gateway 事件循环冲突 |
 | 数据库 memory/user_profile 为空 | 低 | 可能影响持久化功能 |
-| 非回复场景无法发送消息 | 中 | Cron/主动消息时无 context_token，需探索替代方案 |
+| 非回复场景无法发送消息 | ~~中~~ 已解决 | v1.3 新增 ContextTokenStore 磁盘持久化 |
 
 ## 文件说明
 
 ```
-wechat-ilink-installer/
+hermes-wechat/
 ├── install.sh            # 一键安装脚本
 ├── start-wechat.py       # 启动脚本（带二维码显示）
 ├── hermes-wechat.sh      # 服务管理脚本
 ├── hermes-wechat.service # systemd 服务配置
-├── wechat_ilink.py       # Hermes 适配器
+├── wechat_ilink.py       # Hermes 适配器（核心）
 └── README.md             # 本文档
 ```
 
