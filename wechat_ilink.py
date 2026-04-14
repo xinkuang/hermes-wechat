@@ -29,12 +29,9 @@ Configuration in config.yaml:
 - 新增 DM/群聊策略控制：dm_policy 配置项
 - 新增独立工具函数：qr_login() 和 send_wechat_direct() 可独立调用
 
-### v1.4 - 2026-04-14: 修复图片发送问题
-- 新增 send_image_file 方法覆盖 base 默认实现
-- wechatbot SDK 不接受路径字符串，需以 {"image": bytes} 格式发送
-- 配合 gateway extract_markdown_images 检测 ![alt]()path 语法
-- 改用 send_media + _ensure_context_token 替代 reply_media，确保使用最新 token
-- 增加自动重试机制：首次失败后清除缓存 token 并重试一次
+### v1.4 - 2026-04-14: 撤销 send_image_file 复杂实现
+- 删除 send_image_file 覆盖方法，避免引入 context_token / bytes 处理 bug
+- 图片路径保留在 AI 回复文本中，用户可直接查看或访问
 
 ### v1.2 - 2026-04-11: 修复 send_media 参数错误
 - 移除不支持的 media_type 参数
@@ -1067,85 +1064,6 @@ class WeChatILinkAdapter(BasePlatformAdapter):
         except Exception as e:
             logger.error("[%s] Send image failed: %s", self.name, e)
             return SendResult(success=False, error=str(e))
-
-    async def send_image_file(
-        self,
-        chat_id: str,
-        image_path: str,
-        caption: Optional[str] = None,
-        **kwargs,
-    ) -> SendResult:
-        """发送本地图片文件到微信用户。
-
-        覆盖 base 类的默认实现。如果不覆盖，base 类会把文件路径
-        当作文本发送（如 "🖼️ Image: /path/to/img.jpg"），而不是真正的图片。
-
-        触发场景：当 AI 回复中包含本地图片路径时，gateway 的
-        extract_local_files 或 extract_markdown_images 会检测到路径并调用此方法。
-
-        注意：wechatbot SDK 的 send_media/reply_media 不接受文件路径字符串
-        （会被当成纯文本发送）。必须先读取文件为 bytes，再以
-        {"image": bytes} 格式传递。
-        """
-        logger.info("[%s] send_image_file called: path=%s, chat=%s",
-                     self.name, image_path, chat_id)
-
-        if not self._bot:
-            logger.warning("[%s] send_image_file: bot not connected", self.name)
-            return SendResult(success=False, error="Not connected")
-
-        import os
-        if not os.path.isfile(image_path):
-            logger.error("[%s] send_image_file: file does not exist: %s",
-                         self.name, image_path)
-            return SendResult(success=False,
-                              error=f"File not found: {image_path}")
-
-        for attempt in range(2):
-            try:
-                # 读取图片为 bytes，SDK 需要 {"image": bytes} 格式
-                with open(image_path, "rb") as f:
-                    image_bytes = f.read()
-
-                # 确保使用最新的 context_token（v1.4 修复：避免 reply_media
-                # 使用过时的 original_msg token 导致投递失败）
-                context_token = await self._ensure_context_token(chat_id)
-                if not context_token:
-                    return SendResult(
-                        success=False,
-                        error="No context_token available for image send",
-                    )
-
-                # 注入 token 后使用 send_media（而非 reply_media），
-                # 确保路由基于当前有效的 context_token
-                self._bot._context_tokens[chat_id] = context_token
-                logger.info(
-                    "[%s] send_image_file: attempt=%d, size=%d bytes, token=%s",
-                    self.name, attempt + 1, len(image_bytes), context_token[:12] + "...",
-                )
-
-                await self._bot.send_media(chat_id, {"image": image_bytes})
-                if caption:
-                    await self._bot.send(chat_id, caption)
-
-                logger.info("[%s] send_image_file: sent successfully (attempt %d)",
-                            self.name, attempt + 1)
-                return SendResult(success=True)
-
-            except Exception as e:
-                error_str = str(e)
-                logger.warning(
-                    "[%s] send_image_file attempt %d failed: %s",
-                    self.name, attempt + 1, error_str,
-                )
-                if attempt == 0:
-                    # 清除缓存后重试：可能是 context_token 过期
-                    self._message_handlers.pop(chat_id, None)
-                    self._token_store.set(chat_id, None)
-                    continue
-                return SendResult(success=False, error=error_str)
-
-        return SendResult(success=False, error="All retry attempts failed")
 
     async def send_document(
         self,
