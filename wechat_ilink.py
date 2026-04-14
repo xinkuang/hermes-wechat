@@ -1040,7 +1040,7 @@ class WeChatILinkAdapter(BasePlatformAdapter):
         caption: Optional[str] = None,
         **kwargs,
     ) -> SendResult:
-        """发送图片到微信用户。"""
+        """发送图片到微信用户（通过 URL）。"""
         if not self._bot:
             return SendResult(success=False, error="Not connected")
 
@@ -1059,6 +1059,43 @@ class WeChatILinkAdapter(BasePlatformAdapter):
 
         except Exception as e:
             logger.error("[%s] Send image failed: %s", self.name, e)
+            return SendResult(success=False, error=str(e))
+
+    async def send_image_file(
+        self,
+        chat_id: str,
+        image_path: str,
+        caption: Optional[str] = None,
+        **kwargs,
+    ) -> SendResult:
+        """发送本地图片文件到微信用户。
+
+        覆盖 base 类的默认实现。如果不覆盖，base 类会把文件路径
+        当作文本发送（如 "🖼️ Image: /path/to/img.jpg"），而不是真正的图片。
+
+        触发场景：当 AI 回复中包含本地图片路径时，gateway 的
+        extract_local_files 会检测到路径并调用此方法。
+        """
+        if not self._bot:
+            return SendResult(success=False, error="Not connected")
+
+        try:
+            handler_info = self._message_handlers.get(chat_id, {})
+            original_msg = handler_info.get("message")
+
+            if original_msg:
+                # 有原始消息，作为回复发送（使用 reply_media）
+                await self._bot.reply_media(original_msg, image_path)
+                if caption:
+                    await self._bot.reply(original_msg, caption)
+            else:
+                # 主动发送（无上下文消息），使用 send_media
+                await self._bot.send_media(chat_id, image_path)
+
+            return SendResult(success=True)
+
+        except Exception as e:
+            logger.error("[%s] Send image file failed: %s", self.name, e)
             return SendResult(success=False, error=str(e))
 
     async def send_document(
