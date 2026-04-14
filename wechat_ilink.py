@@ -33,6 +33,8 @@ Configuration in config.yaml:
 - 新增 send_image_file 方法覆盖 base 默认实现
 - wechatbot SDK 不接受路径字符串，需以 {"image": bytes} 格式发送
 - 配合 gateway extract_markdown_images 检测 ![alt]()path 语法
+- 改用 send_media + _ensure_context_token 替代 reply_media，确保使用最新 token
+- 增加自动重试机制：首次失败后清除缓存 token 并重试一次
 
 ### v1.2 - 2026-04-11: 修复 send_media 参数错误
 - 移除不支持的 media_type 参数
@@ -1099,32 +1101,51 @@ class WeChatILinkAdapter(BasePlatformAdapter):
             return SendResult(success=False,
                               error=f"File not found: {image_path}")
 
-        try:
-            # 读取图片为 bytes，SDK 需要 {"image": bytes} 格式
-            with open(image_path, "rb") as f:
-                image_bytes = f.read()
+        for attempt in range(2):
+            try:
+                # 读取图片为 bytes，SDK 需要 {"image": bytes} 格式
+                with open(image_path, "rb") as f:
+                    image_bytes = f.read()
 
-            handler_info = self._message_handlers.get(chat_id, {})
-            original_msg = handler_info.get("message")
-            logger.info("[%s] send_image_file: original_msg=%s, size=%d bytes",
-                        self.name, "yes" if original_msg else "no", len(image_bytes))
+                # 确保使用最新的 context_token（v1.4 修复：避免 reply_media
+                # 使用过时的 original_msg token 导致投递失败）
+                context_token = await self._ensure_context_token(chat_id)
+                if not context_token:
+                    return SendResult(
+                        success=False,
+                        error="No context_token available for image send",
+                    )
 
-            if original_msg:
-                await self._bot.reply_media(
-                    original_msg,
-                    {"image": image_bytes},
+                # 注入 token 后使用 send_media（而非 reply_media），
+                # 确保路由基于当前有效的 context_token
+                self._bot._context_tokens[chat_id] = context_token
+                logger.info(
+                    "[%s] send_image_file: attempt=%d, size=%d bytes, token=%s",
+                    self.name, attempt + 1, len(image_bytes), context_token[:12] + "...",
                 )
-                if caption:
-                    await self._bot.reply(original_msg, caption)
-            else:
+
                 await self._bot.send_media(chat_id, {"image": image_bytes})
+                if caption:
+                    await self._bot.send(chat_id, caption)
 
-            logger.info("[%s] send_image_file: sent successfully", self.name)
-            return SendResult(success=True)
+                logger.info("[%s] send_image_file: sent successfully (attempt %d)",
+                            self.name, attempt + 1)
+                return SendResult(success=True)
 
-        except Exception as e:
-            logger.error("[%s] Send image file failed: %s", self.name, e)
-            return SendResult(success=False, error=str(e))
+            except Exception as e:
+                error_str = str(e)
+                logger.warning(
+                    "[%s] send_image_file attempt %d failed: %s",
+                    self.name, attempt + 1, error_str,
+                )
+                if attempt == 0:
+                    # 清除缓存后重试：可能是 context_token 过期
+                    self._message_handlers.pop(chat_id, None)
+                    self._token_store.set(chat_id, None)
+                    continue
+                return SendResult(success=False, error=error_str)
+
+        return SendResult(success=False, error="All retry attempts failed")
 
     async def send_document(
         self,
