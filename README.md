@@ -327,4 +327,12 @@ MIT License
 
 ---
 
+## 📱 关注公众号
+
+扫码关注公众号，获取更多教程和更新：
+
+![公众号二维码](asserts/qrcode_for_logo.jpg)
+
+---
+
 > 基于 [wechatbot-sdk](https://wechatbot.dev) 和 [Hermes](https://github.com/nickyangtc/hermes) 构建
