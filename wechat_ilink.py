@@ -29,6 +29,11 @@ Configuration in config.yaml:
 - 新增 DM/群聊策略控制：dm_policy 配置项
 - 新增独立工具函数：qr_login() 和 send_wechat_direct() 可独立调用
 
+### v1.4 - 2026-04-14: 修复图片发送问题
+- 新增 send_image_file 方法覆盖 base 默认实现
+- wechatbot SDK 不接受路径字符串，需以 {"image": bytes} 格式发送
+- 配合 gateway extract_markdown_images 检测 ![alt]()path 语法
+
 ### v1.2 - 2026-04-11: 修复 send_media 参数错误
 - 移除不支持的 media_type 参数
 
@@ -1074,24 +1079,47 @@ class WeChatILinkAdapter(BasePlatformAdapter):
         当作文本发送（如 "🖼️ Image: /path/to/img.jpg"），而不是真正的图片。
 
         触发场景：当 AI 回复中包含本地图片路径时，gateway 的
-        extract_local_files 会检测到路径并调用此方法。
+        extract_local_files 或 extract_markdown_images 会检测到路径并调用此方法。
+
+        注意：wechatbot SDK 的 send_media/reply_media 不接受文件路径字符串
+        （会被当成纯文本发送）。必须先读取文件为 bytes，再以
+        {"image": bytes} 格式传递。
         """
+        logger.info("[%s] send_image_file called: path=%s, chat=%s",
+                     self.name, image_path, chat_id)
+
         if not self._bot:
+            logger.warning("[%s] send_image_file: bot not connected", self.name)
             return SendResult(success=False, error="Not connected")
 
+        import os
+        if not os.path.isfile(image_path):
+            logger.error("[%s] send_image_file: file does not exist: %s",
+                         self.name, image_path)
+            return SendResult(success=False,
+                              error=f"File not found: {image_path}")
+
         try:
+            # 读取图片为 bytes，SDK 需要 {"image": bytes} 格式
+            with open(image_path, "rb") as f:
+                image_bytes = f.read()
+
             handler_info = self._message_handlers.get(chat_id, {})
             original_msg = handler_info.get("message")
+            logger.info("[%s] send_image_file: original_msg=%s, size=%d bytes",
+                        self.name, "yes" if original_msg else "no", len(image_bytes))
 
             if original_msg:
-                # 有原始消息，作为回复发送（使用 reply_media）
-                await self._bot.reply_media(original_msg, image_path)
+                await self._bot.reply_media(
+                    original_msg,
+                    {"image": image_bytes},
+                )
                 if caption:
                     await self._bot.reply(original_msg, caption)
             else:
-                # 主动发送（无上下文消息），使用 send_media
-                await self._bot.send_media(chat_id, image_path)
+                await self._bot.send_media(chat_id, {"image": image_bytes})
 
+            logger.info("[%s] send_image_file: sent successfully", self.name)
             return SendResult(success=True)
 
         except Exception as e:
