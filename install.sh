@@ -5,15 +5,18 @@
 #   1. 禁用官方微信 weixin 插件
 #   2. 安装我们的 wechat_ilink.py 适配器
 #   3. 注册 Platform 枚举和 _create_adapter 分支
-#   4. 更新 config.yaml 和 .env
-#   5. 安装依赖并重启 gateway
+#   4. 注册 toolset 定义（toolsets.py）
+#   5. 注册 cron 投递映射（cron/scheduler.py）
+#   6. 补丁 base.py extract_markdown_images
+#   7. 更新 config.yaml 和 .env
+#   8. 安装依赖并重启 gateway
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 echo "=========================================="
-echo "  Hermes 微信 iLink Bot 安装脚本 v1.3"
+echo "  Hermes 微信 iLink 一键安装脚本 v1.4"
 echo "=========================================="
 
 # ---------------------------------------------------------------------------
@@ -48,6 +51,10 @@ fi
 PLATFORMS_DIR="$HERMES_AGENT_DIR/gateway/platforms"
 CONFIG_PY="$HERMES_AGENT_DIR/gateway/config.py"
 RUN_PY="$HERMES_AGENT_DIR/gateway/run.py"
+TOOLS_CONFIG="$HERMES_AGENT_DIR/hermes_cli/tools_config.py"
+TOOLSETS_PY="$HERMES_AGENT_DIR/toolsets.py"
+SCHEDULER_PY="$HERMES_AGENT_DIR/cron/scheduler.py"
+BASE_PY="$HERMES_AGENT_DIR/gateway/platforms/base.py"
 CONFIG_YAML="$HERMES_DIR/config.yaml"
 ENV_FILE="$HERMES_DIR/.env"
 
@@ -142,7 +149,6 @@ fi
 # ---------------------------------------------------------------------------
 # 7. 注册 wechat_ilink 到 tools_config.py（PLATFORMS 字典）
 # ---------------------------------------------------------------------------
-TOOLS_CONFIG="$HERMES_AGENT_DIR/hermes_cli/tools_config.py"
 if [ -f "$TOOLS_CONFIG" ]; then
     if ! grep -q "wechat_ilink" "$TOOLS_CONFIG" 2>/dev/null; then
         echo "注册 wechat_ilink 到 tools_config.py..."
@@ -153,6 +159,174 @@ if [ -f "$TOOLS_CONFIG" ]; then
     fi
 else
     echo "⚠ $TOOLS_CONFIG 不存在，跳过 tools_config.py 注册"
+fi
+
+# ---------------------------------------------------------------------------
+# 7b. 注册 wechat_ilink 到 toolsets.py（工具集定义）
+# 原因：如果没有 toolset，AI 拿到空工具列表，只能回答"我没有终端访问权限"
+# ---------------------------------------------------------------------------
+if [ -f "$TOOLSETS_PY" ]; then
+    if ! grep -q "hermes-wechat-ilink" "$TOOLSETS_PY" 2>/dev/null; then
+        echo "注册 wechat_ilink toolset（toolsets.py）..."
+        # 在 hermes-wecom 之前插入 toolset 定义
+        sed -i.bak '/"hermes-wecom": {/i\    "hermes-wechat-ilink": {\n        "description": "WeChat iLink bot toolset - personal WeChat messaging via iLink protocol (full access)",\n        "tools": _HERMES_CORE_TOOLS,\n        "includes": []\n    },\n' "$TOOLSETS_PY"
+        echo "✓ toolset 定义已注册"
+    else
+        echo "  toolset 定义已注册（跳过）"
+    fi
+
+    # 添加到 hermes-gateway includes
+    if ! grep -q '"hermes-wechat-ilink"' "$TOOLSETS_PY" 2>/dev/null; then
+        if grep -q '"hermes-weixin", "hermes-webhook"' "$TOOLSETS_PY" 2>/dev/null; then
+            sed -i.bak 's/"hermes-weixin", "hermes-webhook"/"hermes-weixin", "hermes-wechat-ilink", "hermes-webhook"/' "$TOOLSETS_PY"
+            echo "✓ gateway includes 已注册"
+        fi
+    else
+        echo "  gateway includes 已注册（跳过）"
+    fi
+else
+    echo "⚠ $TOOLSETS_PY 不存在，跳过 toolsets.py 注册"
+fi
+
+# ---------------------------------------------------------------------------
+# 7c. 补丁 cron/scheduler.py：添加 wechat_ilink 到 platform_map
+# 原因：cron 自动投递时，_deliver_result() 通过 platform_map 查找 Platform 枚举
+#       如果缺失，投递会被静默丢弃（last_delivery_error = None，但用户收不到消息）
+# ---------------------------------------------------------------------------
+if [ -f "$SCHEDULER_PY" ]; then
+    if ! grep -q "WECHAT_ILINK" "$SCHEDULER_PY" 2>/dev/null; then
+        echo "补丁 cron/scheduler.py: 添加 wechat_ilink 投递映射..."
+        sed -i.bak '/"weixin": Platform.WEIXIN,/a\        "wechat_ilink": Platform.WECHAT_ILINK,' "$SCHEDULER_PY"
+        echo "✓ cron 投递映射已注册"
+    else
+        echo "  cron 投递映射已注册（跳过）"
+    fi
+else
+    echo "⚠ $SCHEDULER_PY 不存在，跳过 scheduler.py 注册"
+fi
+
+# ---------------------------------------------------------------------------
+# 7d. 补丁 gateway/platforms/base.py：添加 extract_markdown_images 方法
+# 原因：LLM 输出常用 ![alt]()path 或 ![alt](path) 引用本地图片
+#       没有此补丁时，AI 生成的图片不会被提取发送
+# ---------------------------------------------------------------------------
+if [ -f "$BASE_PY" ]; then
+    if ! grep -q "extract_markdown_images" "$BASE_PY" 2>/dev/null; then
+        echo "补丁 base.py: 添加 extract_markdown_images 方法..."
+        cat > /tmp/_patch_extract.py << 'PYEOF'
+import re, sys
+
+content = open(sys.argv[1]).read()
+
+patch = """
+    @staticmethod
+    def extract_markdown_images(content: str) -> Tuple[List[str], str]:
+        \"\"\"Detect markdown image syntax pointing to local file paths.
+
+        Handles patterns like:
+            ![alt]()path/to/image.png    (empty URL, then bare path after `)`)
+            ![alt](path/to/image.png)    (path inside parentheses)
+
+        Returns:
+            Tuple of (list of file paths, cleaned content with full
+            markdown image syntax removed).
+        \"\"\"
+        _LOCAL_MEDIA_EXTS = (
+            '.png', '.jpg', '.jpeg', '.gif', '.webp',
+            '.mp4', '.mov', '.avi', '.mkv', '.webm',
+        )
+        ext_part = '|'.join(e.lstrip('.') for e in _LOCAL_MEDIA_EXTS)
+        md_re = re.compile(r'!\[([^\]]*)\]\(([^)]*)\)')
+        found: list = []
+        code_spans: list = []
+        for m in re.finditer(r'```[^\n]*\n.*?```', content, re.DOTALL):
+            code_spans.append((m.start(), m.end()))
+        for m in re.finditer(r'`[^`\n]+`', content):
+            code_spans.append((m.start(), m.end()))
+        def _in_code(pos: int) -> bool:
+            return any(s <= pos < e for s, e in code_spans)
+        def _is_local_path(p: str) -> bool:
+            if not p: return False
+            p = p.strip()
+            if p.startswith(('http://', 'https://', 'data:')): return False
+            if not (p.startswith('/') or p.startswith('~')): return False
+            ext_match = re.search(r'\.(' + ext_part + r')$', p, re.IGNORECASE)
+            if not ext_match: return False
+            return os.path.isfile(os.path.expanduser(p))
+        def _find_path_in_text(text: str) -> Optional[str]:
+            for ext_match in re.finditer(
+                r'\.(' + ext_part + r')(?:\s|$|[,;:，；：\)）\]}])',
+                text, re.IGNORECASE,
+            ):
+                end_pos = ext_match.start() + 1
+                candidate = text[:end_pos]
+                slash_pos = -1
+                for i in range(len(candidate) - 1, -1, -1):
+                    if candidate[i] == '/':
+                        if i == 0 or candidate[i - 1] in (' ', '\n', '\r', '\t', ')'):
+                            slash_pos = i
+                            break
+                if slash_pos >= 0:
+                    candidate_path = candidate[slash_pos:].strip()
+                    if candidate_path.startswith('/') or candidate_path.startswith('~'):
+                        expanded = os.path.expanduser(candidate_path)
+                        if os.path.isfile(expanded):
+                            return candidate_path
+            return None
+        cleaned = content
+        for match in md_re.finditer(content):
+            if _in_code(match.start()): continue
+            url_path = match.group(2).strip()
+            file_path = None
+            if _is_local_path(url_path):
+                file_path = os.path.expanduser(url_path)
+                cleaned = cleaned.replace(match.group(0), '')
+            elif not url_path:
+                after = content[match.end():]
+                detected = _find_path_in_text(after)
+                if detected:
+                    file_path = os.path.expanduser(detected)
+                    cleaned = cleaned.replace(match.group(0) + detected, '', 1)
+            if file_path:
+                found.append(file_path)
+        seen: set = set()
+        unique: list = []
+        for p in found:
+            if p not in seen:
+                seen.add(p)
+                unique.append(p)
+        cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
+        return unique, cleaned
+
+"""
+
+# Insert before _keep_typing method
+keep_typing_match = re.search(r'(\n    async def _keep_typing\()', content)
+if keep_typing_match:
+    content = content[:keep_typing_match.start()] + patch + content[keep_typing_match.start():]
+    # Also update extract_local_files integration
+    old_line = "local_files, text_content = self.extract_local_files(text_content)"
+    new_lines = """md_images, text_content = self.extract_markdown_images(text_content)
+                if md_images:
+                    logger.info("[%s] extract_markdown_images found %d local image(s)", self.name, len(md_images))
+
+                local_files, text_content = self.extract_local_files(text_content)"""
+    content = content.replace(old_line, new_lines)
+    open(sys.argv[1], 'w').write(content)
+    print("OK")
+else:
+    print("FAIL: _keep_typing not found")
+    sys.exit(1)
+PYEOF
+        if python3 /tmp/_patch_extract.py "$BASE_PY"; then
+            echo "✓ base.py extract_markdown_images 已添加"
+        else
+            echo "⚠ base.py 补丁失败"
+        fi
+        rm -f /tmp/_patch_extract.py
+    else
+        echo "  base.py 已包含 extract_markdown_images（跳过）"
+    fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -186,23 +360,19 @@ wechat_ilink_block = '''  wechat_ilink:
 '''
 
 # 尝试在 weixin 块后插入（在 platforms: 下）
-# 找到 weixin: 行，在其下一行同级 key 之前插入
 pattern = r'(  weixin:[^\n]*(?:\n    [^\n]*)*)'
 match = re.search(pattern, content)
 if match:
     insert_pos = match.end()
-    # 确保插入位置在新行
     if content[insert_pos:insert_pos+1] != '\n':
         insert_pos += 1
     content = content[:insert_pos] + '\n' + wechat_ilink_block + content[insert_pos:]
 else:
-    # 没找到 weixin，尝试在 platforms: 下直接插入
     platforms_match = re.search(r'(platforms:\n)', content)
     if platforms_match:
         insert_pos = platforms_match.end()
         content = content[:insert_pos] + wechat_ilink_block + content[insert_pos:]
     else:
-        # 没有 platforms: 节，创建它
         content += '\nplatforms:\n' + wechat_ilink_block
 
 with open('$CONFIG_YAML', 'w') as f:
@@ -265,7 +435,7 @@ if [ -f "$CONFIG_PY" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 8. 更新 .env：注释官方 weixin 变量，添加 wechat_ilink 变量
+# 9. 更新 .env：注释官方 weixin 变量，添加 wechat_ilink 变量
 # ---------------------------------------------------------------------------
 if [ -f "$ENV_FILE" ]; then
     # 注释掉 WEIXIN_ 开头的变量
@@ -296,7 +466,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 9. 验证安装
+# 10. 验证安装
 # ---------------------------------------------------------------------------
 echo ""
 echo "验证安装..."
@@ -320,12 +490,34 @@ else
 fi
 
 # 检查 tools_config.py
-TOOLS_CONFIG="$HERMES_AGENT_DIR/hermes_cli/tools_config.py"
 if grep -q "wechat_ilink" "$TOOLS_CONFIG" 2>/dev/null; then
     echo "  ✓ tools_config.py 已注册"
 else
     echo "  ✗ tools_config.py 未注册 wechat_ilink"
     VERIFY_OK=false
+fi
+
+# 检查 toolsets.py
+if grep -q "hermes-wechat-ilink" "$TOOLSETS_PY" 2>/dev/null; then
+    echo "  ✓ toolsets.py 已注册"
+else
+    echo "  ✗ toolsets.py 未注册 wechat_ilink toolset"
+    VERIFY_OK=false
+fi
+
+# 检查 cron/scheduler.py
+if grep -q "WECHAT_ILINK" "$SCHEDULER_PY" 2>/dev/null; then
+    echo "  ✓ cron/scheduler.py 已注册"
+else
+    echo "  ✗ cron/scheduler.py 未注册 wechat_ilink"
+    VERIFY_OK=false
+fi
+
+# 检查 base.py extract_markdown_images
+if grep -q "extract_markdown_images" "$BASE_PY" 2>/dev/null; then
+    echo "  ✓ base.py extract_markdown_images"
+else
+    echo "  ⚠ base.py extract_markdown_images 未添加（图片发送可能受限）"
 fi
 
 # 检查 config.py home_channel
@@ -360,7 +552,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 10. 重启 Gateway
+# 11. 重启 Gateway
 # ---------------------------------------------------------------------------
 echo ""
 echo "重启 Hermes Gateway..."

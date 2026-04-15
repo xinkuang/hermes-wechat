@@ -10,6 +10,9 @@ PLATFORMS_DIR="$HERMES_AGENT_DIR/gateway/platforms"
 CONFIG_PY="$HERMES_AGENT_DIR/gateway/config.py"
 RUN_PY="$HERMES_AGENT_DIR/gateway/run.py"
 TOOLS_CONFIG="$HERMES_AGENT_DIR/hermes_cli/tools_config.py"
+TOOLSETS_PY="$HERMES_AGENT_DIR/toolsets.py"
+SCHEDULER_PY="$HERMES_AGENT_DIR/cron/scheduler.py"
+BASE_PY="$HERMES_AGENT_DIR/gateway/platforms/base.py"
 CONFIG_YAML="$HERMES_DIR/config.yaml"
 ENV_FILE="$HERMES_DIR/.env"
 SERVICE_FILE="/etc/systemd/system/hermes-wechat.service"
@@ -47,19 +50,18 @@ fi
 # 5. 通过 git checkout 恢复官方 Hermes 文件（最可靠）
 if [ -d "$HERMES_AGENT_DIR/.git" ]; then
     echo "通过 git 恢复官方文件..."
-    if git -C "$HERMES_AGENT_DIR" checkout HEAD -- "$CONFIG_PY" "$RUN_PY" "$TOOLS_CONFIG" 2>/dev/null; then
-        echo "✓ config.py、run.py、tools_config.py 已恢复（git）"
-        # git 已恢复，跳过 .bak 恢复并清理残留 .bak
-        rm -f "${CONFIG_PY}.bak" "${RUN_PY}.bak" "${TOOLS_CONFIG}.bak"
+    if git -C "$HERMES_AGENT_DIR" checkout HEAD -- "$CONFIG_PY" "$RUN_PY" "$TOOLS_CONFIG" "$TOOLSETS_PY" "$SCHEDULER_PY" "$BASE_PY" 2>/dev/null; then
+        echo "✓ 官方文件已恢复（git）"
+        rm -f "${CONFIG_PY}.bak" "${RUN_PY}.bak" "${TOOLS_CONFIG}.bak" "${TOOLSETS_PY}.bak" "${SCHEDULER_PY}.bak" "${BASE_PY}.bak"
     else
         echo "⚠ git checkout 部分失败，尝试 .bak 恢复..."
-        for f in "$CONFIG_PY" "$RUN_PY" "$TOOLS_CONFIG"; do
+        for f in "$CONFIG_PY" "$RUN_PY" "$TOOLS_CONFIG" "$TOOLSETS_PY" "$SCHEDULER_PY" "$BASE_PY"; do
             [ -f "${f}.bak" ] && mv "${f}.bak" "$f" && echo "✓ $(basename "$f") 已恢复（.bak）"
         done
     fi
 else
     echo "⚠ 非 git 安装，使用 .bak 恢复..."
-    for f in "$CONFIG_PY" "$RUN_PY" "$TOOLS_CONFIG"; do
+    for f in "$CONFIG_PY" "$RUN_PY" "$TOOLS_CONFIG" "$TOOLSETS_PY" "$SCHEDULER_PY" "$BASE_PY"; do
         [ -f "${f}.bak" ] && mv "${f}.bak" "$f" && echo "✓ $(basename "$f") 已恢复（.bak）"
     done
 fi
@@ -116,7 +118,7 @@ fi
 echo ""
 echo "=== 残留检查 ==="
 RESIDUE=false
-for f in "$CONFIG_PY" "$RUN_PY" "$TOOLS_CONFIG"; do
+for f in "$CONFIG_PY" "$RUN_PY" "$TOOLS_CONFIG" "$TOOLSETS_PY" "$SCHEDULER_PY" "$BASE_PY"; do
     if [ -f "$f" ] && grep -q "WECHAT_ILINK\|wechat_ilink" "$f" 2>/dev/null; then
         echo "⚠ $(basename "$f") 仍有 wechat_ilink 残留"
         RESIDUE=true
