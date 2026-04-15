@@ -1,5 +1,5 @@
 #!/bin/bash
-# Hermes 微信 iLink 卸载脚本
+# Hermes 微信 iLink 卸载脚本 v2.0
 # 功能：撤销 install.sh 的所有操作
 
 set -e
@@ -7,18 +7,19 @@ set -e
 HERMES_DIR="$HOME/.hermes"
 HERMES_AGENT_DIR="$HERMES_DIR/hermes-agent"
 PLATFORMS_DIR="$HERMES_AGENT_DIR/gateway/platforms"
-CONFIG_PY="$HERMES_AGENT_DIR/gateway/config.py"
-RUN_PY="$HERMES_AGENT_DIR/gateway/run.py"
-TOOLS_CONFIG="$HERMES_AGENT_DIR/hermes_cli/tools_config.py"
-TOOLSETS_PY="$HERMES_AGENT_DIR/toolsets.py"
-SCHEDULER_PY="$HERMES_AGENT_DIR/cron/scheduler.py"
-BASE_PY="$HERMES_AGENT_DIR/gateway/platforms/base.py"
 CONFIG_YAML="$HERMES_DIR/config.yaml"
 ENV_FILE="$HERMES_DIR/.env"
 SERVICE_FILE="/etc/systemd/system/hermes-wechat.service"
 
+# 定位 venv site-packages
+if [ -d "$HERMES_AGENT_DIR/venv" ]; then
+    VENV_SITE_PACKAGES=$("$HERMES_AGENT_DIR/venv/bin/python" -c "import site; print(site.getsitepackages()[0])" 2>/dev/null)
+else
+    VENV_SITE_PACKAGES=""
+fi
+
 echo "=========================================="
-echo "  Hermes 微信 iLink Bot 卸载脚本"
+echo "  Hermes 微信 iLink Bot 卸载脚本 v2.0"
 echo "=========================================="
 
 # 1. 停止服务
@@ -41,32 +42,25 @@ if [ -f "$PLATFORMS_DIR/wechat_ilink.py" ]; then
     echo "✓ wechat_ilink.py 已删除"
 fi
 
-# 4. 恢复官方 weixin.py
+# 3b. 删除运行时补丁初始化文件
+if [ -f "$PLATFORMS_DIR/wechat_ilink_init.py" ]; then
+    rm -f "$PLATFORMS_DIR/wechat_ilink_init.py"
+    echo "✓ wechat_ilink_init.py 已删除"
+fi
+
+# 4. 恢复官方微信 weixin.py
 if [ -f "$PLATFORMS_DIR/weixin.py.disabled.bak" ]; then
     mv "$PLATFORMS_DIR/weixin.py.disabled.bak" "$PLATFORMS_DIR/weixin.py"
     echo "✓ 官方 weixin.py 已恢复"
 fi
 
-# 5. 通过 git checkout 恢复官方 Hermes 文件（最可靠）
-if [ -d "$HERMES_AGENT_DIR/.git" ]; then
-    echo "通过 git 恢复官方文件..."
-    if git -C "$HERMES_AGENT_DIR" checkout HEAD -- "$CONFIG_PY" "$RUN_PY" "$TOOLS_CONFIG" "$TOOLSETS_PY" "$SCHEDULER_PY" "$BASE_PY" 2>/dev/null; then
-        echo "✓ 官方文件已恢复（git）"
-        rm -f "${CONFIG_PY}.bak" "${RUN_PY}.bak" "${TOOLS_CONFIG}.bak" "${TOOLSETS_PY}.bak" "${SCHEDULER_PY}.bak" "${BASE_PY}.bak"
-    else
-        echo "⚠ git checkout 部分失败，尝试 .bak 恢复..."
-        for f in "$CONFIG_PY" "$RUN_PY" "$TOOLS_CONFIG" "$TOOLSETS_PY" "$SCHEDULER_PY" "$BASE_PY"; do
-            [ -f "${f}.bak" ] && mv "${f}.bak" "$f" && echo "✓ $(basename "$f") 已恢复（.bak）"
-        done
-    fi
-else
-    echo "⚠ 非 git 安装，使用 .bak 恢复..."
-    for f in "$CONFIG_PY" "$RUN_PY" "$TOOLS_CONFIG" "$TOOLSETS_PY" "$SCHEDULER_PY" "$BASE_PY"; do
-        [ -f "${f}.bak" ] && mv "${f}.bak" "$f" && echo "✓ $(basename "$f") 已恢复（.bak）"
-    done
+# 5. 删除运行时注入补丁（sitecustomize.py）
+if [ -n "$VENV_SITE_PACKAGES" ] && [ -f "$VENV_SITE_PACKAGES/sitecustomize.py" ]; then
+    rm -f "$VENV_SITE_PACKAGES/sitecustomize.py"
+    echo "✓ sitecustomize.py（运行时补丁）已删除"
 fi
 
-# 7. 清理 config.yaml 中的 wechat_ilink 配置残留
+# 6. 清理 config.yaml 中的 wechat_ilink 配置残留
 if [ -f "$CONFIG_YAML" ]; then
     if grep -q "wechat_ilink:" "$CONFIG_YAML" 2>/dev/null; then
         python3 -c "
@@ -101,29 +95,42 @@ print('✓ config.yaml 已清理 wechat_ilink 配置')
     fi
 fi
 
-# 8. 清理 .env 中的 wechat_ilink 变量
+# 7. 清理 .env 中的 wechat_ilink 变量
 if [ -f "$ENV_FILE" ]; then
     sed -i '/WECHAT_ILINK/d' "$ENV_FILE"
     sed -i '/微信 iLink/d' "$ENV_FILE"
     echo "✓ .env 已清理"
 fi
 
-# 9. 清理 wechatbot 凭据
+# 8. 清理 wechatbot 凭据
 if [ -d "$HOME/.wechatbot" ]; then
     rm -rf "$HOME/.wechatbot"
     echo "✓ wechatbot 凭据已清理"
 fi
 
-# 10. 最终验证
+# 9. 最终验证
 echo ""
 echo "=== 残留检查 ==="
 RESIDUE=false
-for f in "$CONFIG_PY" "$RUN_PY" "$TOOLS_CONFIG" "$TOOLSETS_PY" "$SCHEDULER_PY" "$BASE_PY"; do
-    if [ -f "$f" ] && grep -q "WECHAT_ILINK\|wechat_ilink" "$f" 2>/dev/null; then
-        echo "⚠ $(basename "$f") 仍有 wechat_ilink 残留"
-        RESIDUE=true
-    fi
-done
+
+# 检查 adapter 文件
+if [ -f "$PLATFORMS_DIR/wechat_ilink.py" ]; then
+    echo "⚠ wechat_ilink.py 仍存在"
+    RESIDUE=true
+fi
+
+# 检查 sitecustomize.py
+if [ -n "$VENV_SITE_PACKAGES" ] && [ -f "$VENV_SITE_PACKAGES/sitecustomize.py" ]; then
+    echo "⚠ sitecustomize.py 仍存在"
+    RESIDUE=true
+fi
+
+# 检查 config.yaml
+if [ -f "$CONFIG_YAML" ] && grep -q "wechat_ilink:" "$CONFIG_YAML" 2>/dev/null; then
+    echo "⚠ config.yaml 仍有 wechat_ilink 配置"
+    RESIDUE=true
+fi
+
 if [ "$RESIDUE" = false ]; then
     echo "✓ 无残留"
 fi

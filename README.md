@@ -13,6 +13,7 @@
 - 🛡️ **消息去重** - 防止网络重试导致重复回复
 - 🔐 **Token 持久化** - 重启后 context_token 自动恢复
 - 🏠 **SetHome 支持** - 通过 `/sethome` 命令设置 Home 频道
+- 🔧 **运行时注入** - 不修改 Hermes 源码，升级不受影响
 
 ## 系统要求
 
@@ -47,15 +48,30 @@ bash install.sh
 1. 安装依赖（wechatbot-sdk、qrcode）
 2. 复制 wechat_ilink.py 适配器到 Hermes gateway
 3. 备份官方微信 weixin 插件
-4. 注册 Platform.WECHAT_ILINK 枚举
-5. 注册适配器路由分支（run.py）
-6. 注册 tools_config.py 平台字典
-7. **注册 toolsets.py 工具集定义**（v1.4 新增，修复 AI 无工具问题）
-8. **补丁 cron/scheduler.py 投递映射**（v1.4 新增，修复 cron 投递静默丢弃）
-9. **补丁 base.py 图片提取方法**（v1.4 新增，支持 ![alt]()path 图片发送）
-10. 补丁 config.py（/sethome 支持）
-11. 更新 config.yaml 和 .env
-12. 重启 Hermes Gateway
+4. **安装运行时注入补丁（sitecustomize.py）**
+5. 更新 config.yaml 和 .env
+6. 修正 systemd 服务 Python 路径
+7. 重启 Hermes Gateway
+
+### 运行时注入原理
+
+v2.0 采用 **运行时注入** 架构，不再修改 Hermes 源码文件：
+
+```
+Python 启动
+  → sitecustomize.py 自动加载
+    → 注册 sys.meta_path 导入钩子
+      → 当 gateway.config 被导入时
+        → 自动注入 Platform.WECHAT_ILINK 枚举
+      → 当 gateway.run 被导入时
+        → 自动包装 _create_adapter 方法
+      → 当 toolsets 被导入时
+        → 自动注册 hermes-wechat-ilink 工具集
+      → 当 cron.scheduler 被导入时
+        → 自动包装 _deliver_result 投递函数
+```
+
+**优势**：Hermes 升级后，补丁会在下次 Python 启动时自动重新应用，无需重新运行 install.sh。
 
 ### 获取登录二维码
 
@@ -82,7 +98,7 @@ bash hermes-wechat.sh uninstall    # 或 bash uninstall.sh，两者等价
 1. 停止并卸载 systemd 服务
 2. 删除 wechat_ilink.py 适配器
 3. 恢复官方微信 weixin.py
-4. 恢复被修改的 Hermes 官方文件（config.py、run.py、tools_config.py、toolsets.py、cron/scheduler.py、gateway/platforms/base.py）
+4. **删除 sitecustomize.py（运行时补丁）**
 5. 清理 config.yaml 和 .env 中的 wechat_ilink 配置
 6. 清理 wechatbot 登录凭据
 
@@ -172,7 +188,7 @@ platforms:
 
 ### 设置 Home 频道
 
-在 Hermes 中运行 `/sethome` 命令即可设置 Home 频道，脚本已自动补丁支持。
+在 Hermes 中运行 `/sethome` 命令即可设置 Home 频道，运行时补丁已自动支持。
 
 ## 常见问题
 
@@ -219,22 +235,41 @@ A: 查看日志：
 hermes gateway logs | grep "Logged in"
 ```
 
-### Q: install.sh 修改了 Hermes 官方文件，安全吗？
-A: 安全。所有修改都有 .bak 备份，`uninstall.sh` 可完全恢复。修改涉及 6 个文件：
+### Q: install.sh 修改了 Hermes 官方文件吗？
+A: **v2.0 不修改任何源码文件。**
 
-| 文件 | 修改内容 |
-|------|---------|
-| `gateway/config.py` | 添加 Platform.WECHAT_ILINK 枚举 + home_channel 支持 |
-| `gateway/run.py` | 添加适配器路由分支 |
-| `hermes_cli/tools_config.py` | 添加平台字典条目 |
-| `toolsets.py` | 添加工具集定义 + gateway includes |
-| `cron/scheduler.py` | 添加 cron 投递 platform_map |
-| `gateway/platforms/base.py` | 添加 extract_markdown_images 方法 |
+我们使用 Python 的 `sitecustomize.py` 机制，在 Python 启动时通过 `sys.meta_path` 导入钩子动态注入补丁。所有修改仅在内存中进行，Hermes 源码文件保持原始状态。
+
+### Q: Hermes 升级后需要重新安装吗？
+A: **不需要。** 运行时补丁在每次 Python 启动时自动应用，与源码版本无关。只要 wechat_ilink.py 适配器文件仍在 `gateway/platforms/` 目录中，就能正常工作。
+
+唯一需要重新安装的情况：Hermes 的 Python venv 被完全删除重建（此时 sitecustomize.py 会被清除）。重新运行 `bash install.sh` 即可恢复。
 
 ### Q: 如何回退到官方微信 weixin？
 A: 运行 `uninstall.sh`，然后编辑 `~/.hermes/config.yaml` 启用 `weixin` 平台。
 
 ## 版本历史
+
+### v2.0 - 2026-04-15: 运行时注入架构
+
+**架构重构：从 sed 补丁到运行时注入**
+
+| 之前（v1.4） | 现在（v2.0） |
+|-------------|-------------|
+| sed 修改 6 个源码文件 | 仅安装 sitecustomize.py |
+| Hermes 升级后全部失效 | 自动重新应用，无需操作 |
+| 卸载需恢复 6 个文件 | 删除 1 个文件即可 |
+
+**补丁注入点：**
+
+| 注入目标 | 注入内容 |
+|---------|---------|
+| Platform 枚举 | 注入 WECHAT_ILINK 成员 |
+| _create_adapter | 包装方法，处理 WECHAT_ILINK case |
+| TOOLSETS 字典 | 注册 hermes-wechat-ilink 工具集 |
+| cron scheduler | 包装 _deliver_result 投递函数 |
+| BasePlatformAdapter | 注入 extract_markdown_images 方法 |
+| load_gateway_config | 包装方法，加载 wechat_ilink 配置 |
 
 ### v1.4 - 2026-04-15: 补全核心改造
 
@@ -260,28 +295,6 @@ A: 运行 `uninstall.sh`，然后编辑 `~/.hermes/config.yaml` 启用 `weixin` 
 | `uninstall.sh` | 一键卸载，完全恢复原始状态 |
 | SDK Bug 修复 | 修复 wechatbot-sdk errcode:-14 检测问题 |
 | /sethome 支持 | 补丁 config.py 支持 home_channel 配置 |
-
-### v1.3 - 2026-04-14: 全面架构升级
-
-**新增功能：**
-
-| 功能 | 说明 |
-|------|------|
-| `ContextTokenStore` | context_token 磁盘持久化，重启后自动恢复 |
-| 消息去重 | 5 分钟 TTL 去重，防止重复响应 |
-| Markdown 格式化 | 标题、表格、代码块微信友好渲染 |
-| `TypingTicketCache` | 打字状态指示器缓存 |
-| DM 策略控制 | `dm_policy` 配置项（open/allowlist/disabled） |
-| `qr_login()` | 独立 QR 登录函数，可用于 CLI |
-| `send_wechat_direct()` | 绕过适配器直接发送消息 |
-
-**Markdown 格式化效果：**
-
-| 输入 | 改造前 | 改造后 |
-|------|--------|--------|
-| `# 分析结果` | `# 分析结果` | `【分析结果】` |
-| `\| A \| B \|` 表格 | 原始 pipe 文本 | `- A: 值` 列表 |
-| 超长代码块 | 按 1500 字硬切 | 按 block 边界，代码块完整 |
 
 ### v1.2 - 2026-04-11: 修复 `send_media` 参数错误
 
@@ -317,17 +330,19 @@ A: 运行 `uninstall.sh`，然后编辑 `~/.hermes/config.yaml` 启用 `weixin` 
 | 数据库 memory/user_profile 为空 | 低 | 可能影响持久化功能 |
 
 **已解决：**
-- ~~Cron 投递静默丢弃~~ → v1.4 补丁 scheduler.py platform_map
-- ~~AI 无工具可用~~ → v1.4 注册 toolsets.py
-- ~~图片不发送~~ → v1.4 补丁 base.py extract_markdown_images
+- ~~Cron 投递静默丢弃~~ → v1.4 运行时注入 scheduler 补丁
+- ~~AI 无工具可用~~ → v1.4 运行时注入 toolset
+- ~~图片不发送~~ → v1.4 运行时注入 extract_markdown_images
 - ~~systemd 路径错误~~ → 修正为 venv/bin/python
+- ~~Hermes 升级后失效~~ → v2.0 运行时注入架构
 
 ## 文件说明
 
 ```
 hermes-wechat/
-├── install.sh            # 一键安装脚本（推荐）
+├── install.sh            # 一键安装脚本（v2.0 运行时注入）
 ├── uninstall.sh          # 一键卸载脚本
+├── sitecustomize.py      # 运行时注入补丁（核心）
 ├── start-wechat.py       # 手动启动脚本（适合测试）
 ├── hermes-wechat.sh      # systemd 服务管理脚本
 ├── hermes-wechat.service # systemd 服务配置
@@ -340,6 +355,9 @@ hermes-wechat/
 ```
 手机微信 ←→ iLink 协议 ←→ wechatbot-sdk ←→ Hermes Gateway ←→ AI 模型
          (扫码登录)      (Python SDK)      (消息路由)       (响应)
+
+运行时注入：
+Python 启动 → sitecustomize.py → sys.meta_path 钩子 → 动态注入补丁
 ```
 
 ## ⚠️ 风险提示
