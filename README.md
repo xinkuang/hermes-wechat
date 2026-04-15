@@ -48,11 +48,14 @@ bash install.sh
 2. 复制 wechat_ilink.py 适配器到 Hermes gateway
 3. 备份官方微信 weixin 插件
 4. 注册 Platform.WECHAT_ILINK 枚举
-5. 注册适配器路由分支
+5. 注册适配器路由分支（run.py）
 6. 注册 tools_config.py 平台字典
-7. 补丁 config.py（/sethome 支持）
-8. 更新 config.yaml 和 .env
-9. 重启 Hermes Gateway
+7. **注册 toolsets.py 工具集定义**（v1.4 新增，修复 AI 无工具问题）
+8. **补丁 cron/scheduler.py 投递映射**（v1.4 新增，修复 cron 投递静默丢弃）
+9. **补丁 base.py 图片提取方法**（v1.4 新增，支持 ![alt]()path 图片发送）
+10. 补丁 config.py（/sethome 支持）
+11. 更新 config.yaml 和 .env
+12. 重启 Hermes Gateway
 
 ### 获取登录二维码
 
@@ -79,7 +82,7 @@ bash hermes-wechat.sh uninstall    # 或 bash uninstall.sh，两者等价
 1. 停止并卸载 systemd 服务
 2. 删除 wechat_ilink.py 适配器
 3. 恢复官方微信 weixin.py
-4. 恢复被修改的 Hermes 官方文件（config.py、run.py、tools_config.py）
+4. 恢复被修改的 Hermes 官方文件（config.py、run.py、tools_config.py、toolsets.py、cron/scheduler.py、gateway/platforms/base.py）
 5. 清理 config.yaml 和 .env 中的 wechat_ilink 配置
 6. 清理 wechatbot 登录凭据
 
@@ -217,17 +220,37 @@ hermes gateway logs | grep "Logged in"
 ```
 
 ### Q: install.sh 修改了 Hermes 官方文件，安全吗？
-A: 安全。所有修改都有 .bak 备份，`uninstall.sh` 可完全恢复。修改仅涉及：
-- `gateway/config.py`：添加枚举和 home_channel 支持
-- `gateway/run.py`：添加适配器路由分支
-- `hermes_cli/tools_config.py`：添加平台字典条目
+A: 安全。所有修改都有 .bak 备份，`uninstall.sh` 可完全恢复。修改涉及 6 个文件：
+
+| 文件 | 修改内容 |
+|------|---------|
+| `gateway/config.py` | 添加 Platform.WECHAT_ILINK 枚举 + home_channel 支持 |
+| `gateway/run.py` | 添加适配器路由分支 |
+| `hermes_cli/tools_config.py` | 添加平台字典条目 |
+| `toolsets.py` | 添加工具集定义 + gateway includes |
+| `cron/scheduler.py` | 添加 cron 投递 platform_map |
+| `gateway/platforms/base.py` | 添加 extract_markdown_images 方法 |
 
 ### Q: 如何回退到官方微信 weixin？
 A: 运行 `uninstall.sh`，然后编辑 `~/.hermes/config.yaml` 启用 `weixin` 平台。
 
 ## 版本历史
 
-### v1.4 - 2026-04-14: 一键安装/卸载脚本
+### v1.4 - 2026-04-15: 补全核心改造
+
+**问题修复：**
+
+| 问题 | 根因 | 修复 |
+|------|------|------|
+| AI 回答"我没有终端访问权限" | toolsets.py 缺少 hermes-wechat-ilink 工具集定义 | install.sh 自动注册 toolset |
+| Cron 任务执行成功但收不到消息 | cron/scheduler.py 缺少 wechat_ilink 投递映射 | install.sh 补丁 platform_map |
+| AI 生成的图片不发送 | base.py 缺少 extract_markdown_images 方法 | install.sh 补丁 base.py |
+
+**改造文件：**
+- `install.sh` → v1.4，新增 3 个补丁步骤 + 验证检查
+- `uninstall.sh` → 同步更新清理范围
+
+### v1.3 - 2026-04-14: 一键安装/卸载脚本
 
 **新增功能：**
 
@@ -289,8 +312,15 @@ A: 运行 `uninstall.sh`，然后编辑 `~/.hermes/config.yaml` 启用 `weixin` 
 
 | 问题 | 严重度 | 说明 |
 |------|--------|------|
+| 微信会话过期 (errcode=-14) | 中 | 二维码过期后需重新扫码，iLink 协议限制 |
 | asyncio.run() 冲突 | 低 | SDK 内部可能与 Gateway 事件循环冲突 |
 | 数据库 memory/user_profile 为空 | 低 | 可能影响持久化功能 |
+
+**已解决：**
+- ~~Cron 投递静默丢弃~~ → v1.4 补丁 scheduler.py platform_map
+- ~~AI 无工具可用~~ → v1.4 注册 toolsets.py
+- ~~图片不发送~~ → v1.4 补丁 base.py extract_markdown_images
+- ~~systemd 路径错误~~ → 修正为 venv/bin/python
 
 ## 文件说明
 
